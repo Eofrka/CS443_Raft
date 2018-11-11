@@ -17,8 +17,11 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
+import (
+	"fmt"
+	"labrpc"
+	"sync"
+)
 
 // import "bytes"
 // import "labgob"
@@ -73,6 +76,16 @@ type Raft struct {
 	votedFor         int
 	voteCount        int
 	log              []*LogEntry
+}
+
+func (rf *Raft) printRaft() {
+	fmt.Printf("[@@@@@ Raft Info @@@@@@]\n")
+	fmt.Printf("me: %d\n", rf.me)
+	fmt.Printf("state: %d\n", rf.state)
+	fmt.Printf("totalServerCount: %d\n", rf.totalServerCount)
+	fmt.Printf("currentTerm: %d\n", rf.currentTerm)
+	fmt.Printf("votedFor: %d\n", rf.votedFor)
+	fmt.Printf("voteCount: %d\n\n", rf.voteCount)
 }
 
 // return currentTerm and whether this server
@@ -243,6 +256,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteCount = 0
 	rf.log = make([]*LogEntry, rf.totalServerCount)
 
+	rf.printRaft()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
