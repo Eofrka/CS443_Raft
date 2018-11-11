@@ -20,7 +20,9 @@ package raft
 import (
 	"fmt"
 	"labrpc"
+	"math/rand"
 	"sync"
+	"time"
 )
 
 // import "bytes"
@@ -73,9 +75,10 @@ type Raft struct {
 	state            int32
 	totalServerCount int
 	currentTerm      int
-	votedFor         int
 	voteCount        int
+	votedFor         int
 	log              []*LogEntry
+	electionTimer    *time.Timer
 }
 
 func (rf *Raft) printRaft() {
@@ -84,7 +87,6 @@ func (rf *Raft) printRaft() {
 	fmt.Printf("state: %d\n", rf.state)
 	fmt.Printf("totalServerCount: %d\n", rf.totalServerCount)
 	fmt.Printf("currentTerm: %d\n", rf.currentTerm)
-	fmt.Printf("votedFor: %d\n", rf.votedFor)
 	fmt.Printf("voteCount: %d\n\n", rf.voteCount)
 }
 
@@ -146,6 +148,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (Lab1, Lab2).
+	Term        int
+	CandidateId int
 }
 
 //
@@ -154,6 +158,15 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (Lab1).
+	Term        int
+	VoteGranted bool
+}
+
+// locked by rf.mu
+func voteGranted(rf *Raft, args *RequestVoteArgs) bool {
+	case1 := args.Term < rf.currentTerm
+	case2 := rf.votedFor != NONE && rf.votedFor != args.CandidateId
+	return !case1 && !case2
 }
 
 //
@@ -161,6 +174,25 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (Lab1, Lab2).
+
+	rf.mu.Lock()
+	fmt.Printf("[Receiver side RequestVote() handler]\n")
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.voteCount = 0
+		rf.state = FOLLOWER
+		electionTimeout := getRandomElectionTimeout()
+		rf.electionTimer.Reset(time.Duration(electionTimeout) * time.Millisecond)
+	}
+
+	//rf.printRaft()
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = voteGranted(rf, args)
+	if reply.VoteGranted {
+		rf.votedFor = args.CandidateId
+	}
+	rf.mu.Unlock()
 }
 
 //
@@ -252,13 +284,99 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.totalServerCount = len(rf.peers)
 	rf.currentTerm = 0
-	rf.votedFor = NONE
 	rf.voteCount = 0
+	rf.votedFor = NONE
 	rf.log = make([]*LogEntry, rf.totalServerCount)
 
 	rf.printRaft()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go startLeaderElection(rf)
+
 	return rf
+}
+
+func getRandomElectionTimeout() int {
+	randomSource := rand.NewSource(time.Now().UnixNano())
+	random := rand.New(randomSource)
+	electionTimeout := 300 + random.Intn(150)
+	return electionTimeout
+}
+
+func broadcastRequestVotes(rf *Raft) {
+	for i := 0; i < rf.totalServerCount; i++ {
+		if i != rf.me {
+			args := new(RequestVoteArgs)
+			reply := new(RequestVoteReply)
+			rf.mu.Lock()
+			//fmt.Printf("		[broadcastRequestVotes]\n")
+			args.Term = rf.currentTerm
+			args.CandidateId = rf.me
+			rf.mu.Unlock()
+			ok := rf.sendRequestVote(i, args, reply)
+			if ok && reply.VoteGranted {
+				rf.mu.Lock()
+				fmt.Printf("	[sendRequestVote returns true, rf.state: %d]\n", rf.state)
+				if reply.Term > rf.currentTerm {
+					// convert to follower
+					rf.currentTerm = reply.Term
+					rf.voteCount = 0
+					rf.votedFor = NONE
+					rf.state = FOLLOWER
+					rf.mu.Unlock()
+					break
+				} else {
+
+					rf.voteCount++
+					failureCount := rf.totalServerCount - rf.voteCount
+					majorityHolds := 2*failureCount+1 <= rf.totalServerCount
+					if majorityHolds {
+						// convert to leader
+						rf.state = LEADER
+						rf.voteCount = 0
+						rf.mu.Unlock()
+						break
+					}
+				}
+
+			}
+
+		}
+	}
+}
+
+func startLeaderElection(rf *Raft) {
+	for {
+		rf.mu.Lock()
+		if rf.state == FOLLOWER || rf.state == CANDIDATE {
+			electionTimeout := getRandomElectionTimeout()
+			// if rf.state == FOLLOWER, it is the initial case that
+			rf.electionTimer = time.NewTimer(time.Duration(electionTimeout) * time.Millisecond)
+			rf.mu.Unlock()
+
+			select {
+			case <-rf.electionTimer.C:
+				rf.mu.Lock()
+				fmt.Printf("state: %d\n", rf.state)
+				rf.currentTerm += 1
+				rf.state = CANDIDATE
+				rf.votedFor = rf.me
+				rf.voteCount += 1
+				rf.mu.Unlock()
+
+				// send RequestVote RPCs to all other servers
+				go broadcastRequestVotes(rf)
+				// case <-rf.leaderElected :
+				//case <- rf.receivedHeartBeat:
+			}
+
+		} else if rf.state == LEADER {
+
+		} else {
+			rf.Kill()
+		}
+
+	}
+
 }
